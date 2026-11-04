@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Leaf Classifier — MLR ex08</title>
+<style>
+  :root {
+    --bg: #10151b; --panel: #1a222c; --line: #2b3745;
+    --text: #e8eef5; --muted: #93a3b5; --accent: #4cc38a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 16px 40px; background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+  }
+  main { width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 1.25rem; margin: 4px 0 0; }
+  h1 small { color: var(--muted); font-weight: 400; }
+  .stage {
+    position: relative; width: 100%;
+    /* square stage; explicit height keeps working on Safari without aspect-ratio */
+    height: min(560px, calc(100vw - 34px));
+    background: #000;
+    border-radius: 14px; overflow: hidden; border: 1px solid var(--line);
+  }
+  .stage video, .stage img.preview {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 100%; object-fit: cover; display: none;
+  }
+  .stage .hint {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); text-align: center; padding: 24px;
+  }
+  /* guides showing the central square that is fed to the model */
+  .cropbox {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    aspect-ratio: 1/1; height: 100%; border: 2px dashed rgba(76,195,138,.8);
+    border-radius: 6px; pointer-events: none; display: none;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button, label.btn {
+    appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+    padding: 12px 18px; border-radius: 10px; font-size: 1rem; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06281a; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=file] { display: none; }
+  #status { color: var(--muted); min-height: 1.4em; font-size: .95rem; }
+  .results { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .row { display: grid; grid-template-columns: 86px 1fr 64px; gap: 10px; align-items: center; padding: 6px 0; }
+  .row .name { font-weight: 600; }
+  .row.top .name { color: var(--accent); }
+  .bar { height: 12px; background: #0c1116; border-radius: 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 6px;
+           transition: width .18s ease-out; }
+  .row:not(.top) .bar i { background: #3d7ea6; }
+  .row .pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .row.top .pct { color: var(--text); }
+  #timing { color: var(--muted); font-size: .85rem; margin-top: 6px; }
+  section.qr {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px; display: flex; gap: 18px; align-items: center;
+  }
+  section.qr canvas { width: 150px; height: 150px; background: #fff; border-radius: 8px; flex: none; }
+  section.qr h2 { margin: 0 0 6px; font-size: 1rem; }
+  section.qr p { margin: 0 0 8px; color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+  section.qr a { color: var(--accent); }
+  footer { color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🍂 Leaf Classifier <small>— MLR ex08, runs on-device</small></h1>
+  <div id="status">Loading model…</div>
+
+  <div class="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <img id="preview" class="preview" alt="uploaded leaf">
+    <div class="cropbox" id="cropbox"></div>
+    <div class="hint" id="hint">Point the rear camera at a leaf, or upload a photo.</div>
+  </div>
+
+  <div class="controls">
+    <button id="btnStart" class="primary">Start camera</button>
+    <button id="btnStop" disabled>Stop camera</button>
+    <label class="btn" for="file">Upload photo<input id="file" type="file" accept="image/*"></label>
+  </div>
+
+  <div class="results">
+    <div id="rows"></div>
+    <div id="timing"></div>
+  </div>
+
+  <!-- ============ QR code: scan to open this page on a phone ============ -->
+  <section class="qr" aria-label="QR code link to this page">
+    <canvas id="qrcanvas" width="330" height="330"></canvas>
+    <div>
+      <h2>QR code — open on your phone</h2>
+      <p>Scan to open this page: <a id="qrLink" href="#" rel="noopener">this page</a></p>
+    </div>
+  </section>
+
+  <footer>Preprocessing: central square crop → 96×96 → RGB÷255 → normalize (mean/std) → 1×3×96×96, softmax on logits.</footer>
+</main>
+
+<canvas id="work" width="96" height="96" style="display:none"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
+<!-- QR generator vendored next to the page (qrcode-generator 1.4.4, MIT) so the QR
+     is always generated in-browser; no external QR-image service is used. -->
+<script src="vendor/qrcode.js"></script>
+<script>
+'use strict';
+
+/* ---- Model contract, taken verbatim from model_info.json ---- */
+var MODEL_INFO = {
+  classes: ["apple", "cherry", "chestnut", "maple"],
+  input_size: 96,
+  mean: [0.485, 0.456, 0.406],
+  std: [0.229, 0.224, 0.225]
+};
+var MODEL_URL = 'leaf_model.onnx';
+var PAGE_URL = 'https://kovarski-c.github.io/mlr-ex08/';
+
+var statusEl = document.getElementById('status');
+var hintEl = document.getElementById('hint');
+var video = document.getElementById('video');
+var preview = document.getElementById('preview');
+var cropbox = document.getElementById('cropbox');
+var btnStart = document.getElementById('btnStart');
+var btnStop = document.getElementById('btnStop');
+var fileInput = document.getElementById('file');
+var work = document.getElementById('work');
+var workCtx = work.getContext('2d', { willReadFrequently: true });
+
+var N = MODEL_INFO.input_size;
+var session = null;
+var inputName = null, outputName = null;
+var stream = null;          // live MediaStream from the rear camera
+var running = false;        // camera inference loop active
+var busy = false;           // an inference is in flight
+
+/* ---------- setup ---------- */
+// iOS Safari has no SharedArrayBuffer without cross-origin isolation; force single-threaded WASM.
+ort.env.wasm.numThreads = 1;
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+function buildRows() {
+  var host = document.getElementById('rows');
+  MODEL_INFO.classes.forEach(function (cls) {
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.dataset.cls = cls;
+    row.innerHTML = '<span class="name"></span><span class="bar"><i></i></span><span class="pct">—</span>';
+    row.querySelector('.name').textContent = cls;
+    host.appendChild(row);
+  });
+}
+buildRows();
+
+async function loadModel() {
+  setStatus('Loading model…');
+  session = await ort.InferenceSession.create(MODEL_URL, { executionProviders: ['wasm'] });
+  inputName = session.inputNames[0];
+  outputName = session.outputNames[0];
+  setStatus('Model ready. Start the camera or upload a photo.');
+}
+
+/* ---------- preprocessing (exactly per model_info.json) ---------- */
+// Draws the CENTRAL SQUARE of [src] (sw x sh source pixels) into the 96x96 work canvas,
+// then converts RGBA -> float32 CHW, pixels scaled to 0..1 and standardized per channel.
+function tensorFromSource(src, sw, sh) {
+  var s = Math.min(sw, sh);
+  var sx = (sw - s) / 2, sy = (sh - s) / 2;
+  workCtx.drawImage(src, sx, sy, s, s, 0, 0, N, N);
+  var px = workCtx.getImageData(0, 0, N, N).data; // RGBA, already 96x96
+  var mean = MODEL_INFO.mean, std = MODEL_INFO.std;
+  var area = N * N;
+  var data = new Float32Array(3 * area);
+  for (var i = 0; i < area; i++) {
+    var o = i * 4;
+    data[i] = (px[o] / 255 - mean[0]) / std[0];
+    data[area + i] = (px[o + 1] / 255 - mean[1]) / std[1];
+    data[2 * area + i] = (px[o + 2] / 255 - mean[2]) / std[2];
+  }
+  return new ort.Tensor('float32', data, [1, 3, N, N]);
+}
+
+function softmax(logits) {
+  var m = -Infinity, i, e = new Float64Array(logits.length), s = 0;
+  for (i = 0; i < logits.length; i++) if (logits[i] > m) m = logits[i];
+  for (i = 0; i < logits.length; i++) { e[i] = Math.exp(logits[i] - m); s += e[i]; }
+  for (i = 0; i < logits.length; i++) e[i] /= s;
+  return e;
+}
+
+/* ---------- inference + display ---------- */
+function render(probs, ms, sourceLabel) {
+  var rows = document.getElementById('rows').children;
+  var best = 0;
+  for (var i = 1; i < probs.length; i++) if (probs[i] > probs[best]) best = i;
+  for (i = 0; i < rows.length; i++) {
+    var cls = rows[i].dataset.cls, p = probs[MODEL_INFO.classes.indexOf(cls)];
+    rows[i].querySelector('i').style.width = (p * 100).toFixed(1) + '%';
+    rows[i].querySelector('.pct').textContent = (p * 100).toFixed(2) + '%';
+    rows[i].classList.toggle('top', cls === MODEL_INFO.classes[best]);
+  }
+  document.getElementById('timing').textContent =
+    sourceLabel + ' · ' + MODEL_INFO.classes[best] + ' ' + (probs[best] * 100).toFixed(1) +
+    '% · ' + ms.toFixed(0) + ' ms';
+}
+
+async function classify(src, sw, sh, sourceLabel) {
+  if (!session || busy || sw === 0 || sh === 0) return;
+  busy = true;
+  try {
+    var t0 = performance.now();
+    var feeds = {};
+    feeds[inputName] = tensorFromSource(src, sw, sh);
+    var out = await session.run(feeds);
+    var logits = out[outputName].data;
+    render(softmax(logits), performance.now() - t0, sourceLabel);
+  } catch (err) {
+    setStatus('Inference error: ' + err.message);
+  } finally {
+    busy = false;
+  }
+}
+
+function loop() {
+  if (!running) return;
+  if (!busy && video.readyState >= 2) {
+    classify(video, video.videoWidth, video.videoHeight, 'camera');
+  }
+  requestAnimationFrame(loop);
+}
+
+/* ---------- rear camera (iOS Safari: user gesture + playsinline) ---------- */
+btnStart.addEventListener('click', async function () {
+  if (stream || !session) return;
+  btnStart.disabled = true;
+  try {
+    var constraints = { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } };
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      // fall back to whatever camera the browser offers
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    }
+    video.srcObject = stream;
+    await video.play();
+    running = true;
+    preview.style.display = 'none';
+    video.style.display = 'block';
+    cropbox.style.display = 'block';
+    hintEl.style.display = 'none';
+    btnStop.disabled = false;
+    setStatus('Camera on — classifying live.');
+    requestAnimationFrame(loop);
+  } catch (err) {
+    btnStart.disabled = false;
+    setStatus('Camera failed: ' + err.message + ' — use “Upload photo” instead.');
+  }
+});
+
+btnStop.addEventListener('click', stopCamera);
+function stopCamera() {
+  running = false;
+  if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+  video.pause();
+  video.srcObject = null;
+  video.style.display = 'none';
+  cropbox.style.display = 'none';
+  if (preview.style.display !== 'block') hintEl.style.display = 'flex';
+  btnStart.disabled = false;
+  btnStop.disabled = true;
+  setStatus('Camera off.');
+}
+
+/* ---------- photo upload fallback ---------- */
+fileInput.addEventListener('change', function () {
+  var f = fileInput.files && fileInput.files[0];
+  if (!f) return;
+  var url = URL.createObjectURL(f);
+  var img = new Image();
+  img.onload = async function () {
+    stopCamera();
+    preview.src = url;
+    preview.style.display = 'block';
+    hintEl.style.display = 'none';
+    setStatus('Photo loaded — classifying…');
+    while (busy) await new Promise(function (r) { setTimeout(r, 50); }); // let an in-flight camera run finish
+    await classify(img, img.naturalWidth, img.naturalHeight, f.name);
+  };
+  img.onerror = function () { setStatus('Could not decode that image.'); };
+  img.src = url;
+});
+
+/* ---------- QR code, generated in-browser (no external QR service) ---------- */
+function drawQr() {
+  var qr = qrcode(0, 'M');           // version 0 = auto-size, error correction M
+  qr.addData(PAGE_URL);
+  qr.make();
+  var n = qr.getModuleCount(), quiet = 4;
+  var canvas = document.getElementById('qrcanvas');
+  var size = canvas.width, cell = size / (n + quiet * 2);
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#000000';
+  for (var r = 0; r < n; r++) {
+    for (var c = 0; c < n; c++) {
+      if (qr.isDark(r, c)) {
+        // +1 px overlap to avoid hairline gaps between modules
+        ctx.fillRect(Math.floor((c + quiet) * cell), Math.floor((r + quiet) * cell),
+                     Math.ceil(cell) + 1, Math.ceil(cell) + 1);
+      }
+    }
+  }
+  var link = document.getElementById('qrLink');
+  link.href = PAGE_URL;
+  link.textContent = PAGE_URL;
+}
+
+/* ---------- go ---------- */
+try { drawQr(); } catch (e) { setStatus('QR generator failed to load.'); }
+loadModel().catch(function (err) { setStatus('Model load failed: ' + err.message); });
+</script>
+</body>
+</html>
