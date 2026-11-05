@@ -89,6 +89,9 @@
     <label class="btn" for="file">Upload photo<input id="file" type="file" accept="image/*"></label>
   </div>
 
+  <!-- one button per .onnx file next to the page; the lit one is what is running now -->
+  <div class="controls" id="modelBtns" aria-label="Choose the model"></div>
+
   <div class="results">
     <div id="rows"></div>
     <div id="timing"></div>
@@ -122,7 +125,17 @@ var MODEL_INFO = {
   mean: [0.485, 0.456, 0.406],
   std: [0.229, 0.224, 0.225]
 };
-var MODEL_URL = new URLSearchParams(location.search).get('model') || 'leaf_model.onnx';
+/* The model files that live next to the page; the buttons under the camera switch between
+   them. Both want the same tensor (see MODEL_INFO), so nothing else in the page changes.
+   ?model=some.onnx picks another file instead and overrides the buttons. */
+var MODELS = [
+  { id: 'task4', url: 'leaf_model_task4.onnx', label: 'Task 4 · MobileNet, last layer trained' },
+  { id: 'task2', url: 'leaf_model.onnx', label: 'Task 2 · network from the notebook' }
+];
+var urlModel = new URLSearchParams(location.search).get('model');
+var START_MODEL = urlModel ? { id: 'param', url: urlModel, label: 'model from ?model=' }
+                           : MODELS[0];    // the Task 4 model runs unless asked otherwise
+var MODEL_URL = START_MODEL.url;
 var PAGE_URL = 'https://kovarski-c.github.io/mlr-ex08/';
 
 var statusEl = document.getElementById('status');
@@ -162,13 +175,56 @@ function buildRows() {
 }
 buildRows();
 
-async function loadModel() {
-  setStatus('Loading model…');
-  session = await ort.InferenceSession.create(MODEL_URL, { executionProviders: ['wasm'] });
+async function loadModel(m) {
+  var old = session;
+  session = null;                       // classify() does nothing until the new one is ready
+  setStatus('Loading ' + m.label + '…');
+  session = await ort.InferenceSession.create(m.url, { executionProviders: ['wasm'] });
   inputName = session.inputNames[0];
   outputName = session.outputNames[0];
-  setStatus('Model ready. Start the camera or upload a photo.');
+  MODEL_URL = m.url;
+  if (old) { try { await old.release(); } catch (e) { /* already freed, nothing to do */ } }
+  markModelButtons();
+  setStatus('Model ready: ' + m.label + ' (' + m.url + '). Start the camera or upload a photo.');
 }
+
+/* ---------- the model switch ---------- */
+function buildModelButtons() {
+  var host = document.getElementById('modelBtns');
+  MODELS.forEach(function (m) {
+    var b = document.createElement('button');
+    b.id = 'btn-' + m.id;
+    b.textContent = m.label;
+    b.title = m.url;
+    b.addEventListener('click', function () { useModel(m); });
+    host.appendChild(b);
+  });
+}
+
+function markModelButtons() {
+  MODELS.forEach(function (m) {
+    var b = document.getElementById('btn-' + m.id);
+    var on = (m.url === MODEL_URL);
+    b.classList.toggle('primary', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+async function useModel(m) {
+  if (m.url === MODEL_URL) return;      // already the one running
+  while (busy) await new Promise(function (r) { setTimeout(r, 50); }); // let an in-flight run finish
+  try {
+    await loadModel(m);
+    // if a photo is on screen, show what the new model makes of it
+    if (preview.style.display === 'block' && preview.naturalWidth) {
+      await classify(preview, preview.naturalWidth, preview.naturalHeight, 'photo');
+    }
+  } catch (err) {
+    setStatus('Model load failed: ' + err.message);
+  }
+}
+
+buildModelButtons();
 
 /* ---------- preprocessing (exactly per model_info.json) ---------- */
 // Draws the CENTRAL SQUARE of [src] (sw x sh source pixels) into the 96x96 work canvas,
@@ -328,7 +384,7 @@ function drawQr() {
 
 /* ---------- go ---------- */
 try { drawQr(); } catch (e) { setStatus('QR generator failed to load.'); }
-loadModel().catch(function (err) { setStatus('Model load failed: ' + err.message); });
+loadModel(START_MODEL).catch(function (err) { setStatus('Model load failed: ' + err.message); });
 </script>
 </body>
 </html>
