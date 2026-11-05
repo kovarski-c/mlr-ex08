@@ -26,4 +26,4 @@ BatchNorm gains on the clean val set and nothing on the camera set, augmentation
 
 # Which model goes on the phone
 `mnv3_frozen`: camera-like accuracy is the best and the steadiest one (63.1 ± 2.1 %) except of `mnv3_full_aug`, but this one takes like 10 times more time to train, that's why I choose `mnv3_frozen`.
-![screenshot_task4.png](screenshot_task4.png)
+![screenshot_task4.png](screenshot-task4.png)
